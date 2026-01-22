@@ -136,6 +136,7 @@ end
 %% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
+
 forceThis = 1;
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Skeletonize using scikit-image
@@ -147,75 +148,63 @@ skeletonize_nifti(tof_vesselSeg, tof_skeleton_skimage, 'lee', forceThis);
 
 
 forceThis = 1;
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% Label connected components
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Label connected components (vessels)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 tof_skeleton_skimage_label = fullfile(fileparts(tof_skeleton_skimage), 'tof_skeleton_label.nii.gz');
 if forceThis || ~exist(tof_skeleton_skimage_label,'file')
     label_connected_components_nifti(tof_skeleton_skimage, tof_skeleton_skimage_label, 3);
 end
-%% %%%%%%%%%%%%%%%%%%%%%%%%%%
+%% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
-
-
-
-
-
-
-
-
-mri_tof_skeleton_skimage_label = MRIread(tof_skeleton_skimage_label);
-
-% Get component information for compatibility with existing code
-mriTofSkeleton = MRIread(tof_skeleton_skimage);
-% Note: Components in labeled image are already sorted (1 = largest, 2 = second largest, etc.)
-% Get number of components from labeled image
-num_components = max(mri_tof_skeleton_skimage_label.vol(:));
-% Create CC structure for compatibility (though we'll use labeled image directly)
-CC = bwconncomp(mri_tof_skeleton_skimage_label.vol > 0, 26);
-% Rebuild PixelIdxList from labeled image to match sorted order
-CC.PixelIdxList = cell(1, num_components);
-for i = 1:num_components
-    CC.PixelIdxList{i} = find(mri_tof_skeleton_skimage_label.vol == i);
+forceThis = 1;
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Write mask of selected vessels
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+okCompIdx = [2 31 20 18 25 15 19 8 56 14 29 50 6 9];
+mriVesselLabels = MRIread(tof_skeleton_skimage_label);
+vesselMaskList = cell(length(okCompIdx), 1);
+for i = 1:length(okCompIdx)
+    vesselMaskList{i} = fullfile(fileparts(tof_skeleton_skimage_label), ['tof_skeleton_label_' num2str(okCompIdx(i)) '.nii.gz']);
+    if ~forceThis && exist(vesselMaskList{i}, 'file'); continue; end
+    tmp = mriVesselLabels;
+    tmp.vol = zeros(size(tmp.vol));
+    tmp.vol(mriVesselLabels.vol == okCompIdx(i)) = 1;
+    MRIwrite(tmp, vesselMaskList{i});
 end
+%% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
-% manually select good components
-okCompIdx_fromSkel = [21 31 19 15 51 9 18];
-% okCompIdx_fromSkel = [2 31 21 15 24 19 51 18];
-% write each good component to a separate nii file
-mri = mriTofSkeleton;
-for i = 1:length(okCompIdx_fromSkel)
-    mri.vol = zeros(size(mri.vol));
-    mri.vol(CC.PixelIdxList{okCompIdx_fromSkel(i)}) = 1;
-    tof_skeleton_labels{i} = fullfile(fileparts(tof_skeleton_skimage_label), ['tof_skeleton_' num2str(okCompIdx_fromSkel(i)) '.nii.gz']);
-    MRIwrite(mri, tof_skeleton_labels{i});
-end
+
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Extract centerlines from skeleton for each vessel
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Create centerline VTK files for each identified vessel skeleton
-tof_skeleton_centerlines = cell(length(okCompIdx_fromSkel), 1);
-for i = 1:length(okCompIdx_fromSkel)
-    % Extract skeleton voxel indices for this vessel
-    voxel_indices = CC.PixelIdxList{okCompIdx_fromSkel(i)};
-
-    tof_skeleton_labels{i}
-    
-    % Convert to (x,y,z) coordinates (1-based indexing from ind2sub)
-    [x, y, z] = ind2sub(size(mriTofSkeleton.vol), voxel_indices);
-    voxel_coords = [x, y, z];
-    
-    % Convert to RAS coordinates
-    ras_coords = voxel_to_ras_coords(voxel_coords, mriTofSkeleton);
-    
-    % Write VTK centerline file
-    output_vtk = fullfile(fileparts(tof_skeleton_skimage_label), ['tof_skeleton_centerline_' num2str(okCompIdx_fromSkel(i)) '.vtk']);
-    tof_skeleton_centerlines{i} = ras_coords_to_vtk(ras_coords, output_vtk);
-    fprintf('Created centerline: %s (%d points)\n', tof_skeleton_centerlines{i}, size(ras_coords, 1));
+% Using graph extraction to preserve full branching structure
+% Use original TOF volume as reference for affine transformation to ensure
+% proper spatial alignment
+vesselCenterlineList = cell(size(vesselMaskList));
+for i = 1:length(vesselMaskList)
+    % Extract graph from skeleton component and write VTK centerline
+    % This creates a full graph where each skeleton voxel is a node
+    % and edges connect adjacent voxels, preserving branching structure
+    vesselCenterlineList{i} = replace(replace(vesselMaskList{i}, '.nii.gz', '.vtk'),'/seg/','/centerlines/');
+    if ~forceThis && exist(vesselCenterlineList{i}, 'file'); continue; end
+    % Use original TOF volume as reference for affine to ensure correct spatial coordinates
+    skeleton_to_graph_vtk(vesselMaskList{i}, vesselCenterlineList{i}, 26, forceThis, tof);
 end
+%% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+i = 3;
+vmtk_viewVolAndSurf(tof, vesselCenterlineList{i});
+vmtk_viewVolAndCenterlines(tof, vesselCenterlineList{i});
+
+
+
+
 
 
 
@@ -245,7 +234,6 @@ for i = 1:length(okCompIdx_fromSeg)
 end
 
 return
-
 
 vmtk_viewVolAndSurf(tof, tof_vessel_centerlines{i})
 

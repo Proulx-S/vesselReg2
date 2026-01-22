@@ -3,7 +3,7 @@ close all
 % clc
 % figure('Menu','none','ToolBar','none');
 
-projectName = 'vesselReg';
+projectName = 'vesselReg2';
 %%%%%%%%%%%%%%%%%%%%%
 %% Set up environment
 %%%%%%%%%%%%%%%%%%%%%
@@ -62,9 +62,9 @@ switch envId
         %%%% vmtk
         src.vmtk = 'ml vmtk/1.5.0';
         system([src.vmtk '; vmtkcenterlines --help > /dev/null'],'-echo');
-        %%%% slicer
-        src.slicer = 'ml slicer/5.0.3';
-        system([src.slicer '; slicer --version > /dev/null'],'-echo');
+        %%%% nipype
+        src.nipype = 'ml nipype/1.8.3';
+        system([src.nipype '; python -c "import nibabel, skimage.morphology; print(''nipype OK'')"'],'-echo');
     case 2
         warning('neurodesk not implemented for this environment');
     otherwise
@@ -135,152 +135,118 @@ if forceThis || ~exist(tof_vesselSeg,'file');
 end
 %% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-% Skeletonize the vessel segmentation using MATLAB
-mriTofSeg = MRIread(tof_vesselSeg);
-mriTofSkeleton = mriTofSeg;
-mriTofSkeleton.vol = bwskel(mriTofSeg.vol > 0);
-tof_skeleton = fullfile(fileparts(tof_vesselSeg), 'tof_skeleton.nii.gz');
-% MRIwrite(mriTofSkeleton, tof_skeleton);
+
+forceThis = 1;
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Skeletonize using scikit-image
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Use scikit-image's skeletonize (Lee method for 3D)
+tof_skeleton_skimage = fullfile(fileparts(tof_vesselSeg), 'tof_skeleton_skimage.nii.gz');
+skeletonize_nifti(tof_vesselSeg, tof_skeleton_skimage, 'lee', forceThis);
+%% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+forceThis = 1;
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Label connected components
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+tof_skeleton_skimage_label = fullfile(fileparts(tof_skeleton_skimage), 'tof_skeleton_label.nii.gz');
+if forceThis || ~exist(tof_skeleton_skimage_label,'file')
+    label_connected_components_nifti(tof_skeleton_skimage, tof_skeleton_skimage_label, 3);
+end
+%% %%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
 
-% segAndSkeleton = mriTofSeg.vol;
-% segAndSkeleton(mriTofSkeleton.vol>0) = 2;
-% segAndSkeleton = uint8(segAndSkeleton./max(segAndSkeleton(:)) .* 255);
-% orthosliceViewer(segAndSkeleton);
 
 
-% % Find connected components --- from skeleton
-% CC = bwconncomp(mriTofSkeleton.vol, 26);
-% [a,b] = sort(cellfun(@length, CC.PixelIdxList),'descend');
-% CC.PixelIdxList = CC.PixelIdxList(b);
 
-% tof_skeleton_label = fullfile(fileparts(tof_skeleton), 'tof_skeleton_label.nii.gz');
-% mriTofSkeletonLabel = mriTofSkeleton;
-% mriTofSkeletonLabel.vol = zeros(size(mriTofSkeleton.vol));
-% for i = 1:length(CC.PixelIdxList)
-%     mriTofSkeletonLabel.vol(CC.PixelIdxList{i}) = i;
-% end
-% MRIwrite(mriTofSkeletonLabel, tof_skeleton_label);
-% % manually select good components
+
+
+
+
+mri_tof_skeleton_skimage_label = MRIread(tof_skeleton_skimage_label);
+
+% Get component information for compatibility with existing code
+mriTofSkeleton = MRIread(tof_skeleton_skimage);
+% Note: Components in labeled image are already sorted (1 = largest, 2 = second largest, etc.)
+% Get number of components from labeled image
+num_components = max(mri_tof_skeleton_skimage_label.vol(:));
+% Create CC structure for compatibility (though we'll use labeled image directly)
+CC = bwconncomp(mri_tof_skeleton_skimage_label.vol > 0, 26);
+% Rebuild PixelIdxList from labeled image to match sorted order
+CC.PixelIdxList = cell(1, num_components);
+for i = 1:num_components
+    CC.PixelIdxList{i} = find(mri_tof_skeleton_skimage_label.vol == i);
+end
+
+
+% manually select good components
+okCompIdx_fromSkel = [21 31 19 15 51 9 18];
 % okCompIdx_fromSkel = [2 31 21 15 24 19 51 18];
+% write each good component to a separate nii file
+mri = mriTofSkeleton;
+for i = 1:length(okCompIdx_fromSkel)
+    mri.vol = zeros(size(mri.vol));
+    mri.vol(CC.PixelIdxList{okCompIdx_fromSkel(i)}) = 1;
+    tof_skeleton_labels{i} = fullfile(fileparts(tof_skeleton_skimage_label), ['tof_skeleton_' num2str(okCompIdx_fromSkel(i)) '.nii.gz']);
+    MRIwrite(mri, tof_skeleton_labels{i});
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Extract centerlines from skeleton for each vessel
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Create centerline VTK files for each identified vessel skeleton
+tof_skeleton_centerlines = cell(length(okCompIdx_fromSkel), 1);
+for i = 1:length(okCompIdx_fromSkel)
+    % Extract skeleton voxel indices for this vessel
+    voxel_indices = CC.PixelIdxList{okCompIdx_fromSkel(i)};
+
+    tof_skeleton_labels{i}
+    
+    % Convert to (x,y,z) coordinates (1-based indexing from ind2sub)
+    [x, y, z] = ind2sub(size(mriTofSkeleton.vol), voxel_indices);
+    voxel_coords = [x, y, z];
+    
+    % Convert to RAS coordinates
+    ras_coords = voxel_to_ras_coords(voxel_coords, mriTofSkeleton);
+    
+    % Write VTK centerline file
+    output_vtk = fullfile(fileparts(tof_skeleton_skimage_label), ['tof_skeleton_centerline_' num2str(okCompIdx_fromSkel(i)) '.vtk']);
+    tof_skeleton_centerlines{i} = ras_coords_to_vtk(ras_coords, output_vtk);
+    fprintf('Created centerline: %s (%d points)\n', tof_skeleton_centerlines{i}, size(ras_coords, 1));
+end
+
+
 
 
 
 % Find connected components --- from seg
-% CC = bwconncomp(mriTofSeg.vol > 0, 26);
-% [a,b] = sort(cellfun(@length, CC.PixelIdxList),'descend');
-% CC.PixelIdxList = CC.PixelIdxList(b);
+CC = bwconncomp(mriTofSeg.vol > 0, 26);
+[a,b] = sort(cellfun(@length, CC.PixelIdxList),'descend');
+CC.PixelIdxList = CC.PixelIdxList(b);
 
 tof_seg_label = fullfile(fileparts(tof_vesselSeg), 'tof_seg_label.nii.gz');
 mriTofSegLabel = mriTofSeg;
 mriTofSegLabel.vol = zeros(size(mriTofSeg.vol));
-% for i = 1:length(CC.PixelIdxList)
-%     mriTofSegLabel.vol(CC.PixelIdxList{i}) = i;
-% end
-% MRIwrite(mriTofSegLabel, tof_seg_label);
+for i = 1:length(CC.PixelIdxList)
+    mriTofSegLabel.vol(CC.PixelIdxList{i}) = i;
+end
+MRIwrite(mriTofSegLabel, tof_seg_label);
 % manually select good components
 okCompIdx_fromSeg = [33 17 19 20 13 52];
 % write each good component to a separate nii file
 mri = mriTofSeg;
 for i = 1:length(okCompIdx_fromSeg)
     mri.vol = zeros(size(mri.vol));
-    % mri.vol(CC.PixelIdxList{okCompIdx_fromSeg(i)}) = 1;
-    tof_vessel_label{i} = fullfile(fileparts(tof_seg_label), ['tof_vessel_' num2str(okCompIdx_fromSeg(i)) '.nii.gz']);
-    % MRIwrite(mri, tof_vessel_label{i});
+    mri.vol(CC.PixelIdxList{okCompIdx_fromSeg(i)}) = 1;
+    tof_vessel_labels{i} = fullfile(fileparts(tof_seg_label), ['tof_vessel_' num2str(okCompIdx_fromSeg(i)) '.nii.gz']);
+    MRIwrite(mri, tof_vessel_labels{i});
 end
 
 return
 
-forceThis = 1;
-for i = 5%1:length(okCompIdx_fromSeg)
-    tof_vessel_centerlines{i} = replace(replace(tof_vessel_label{i}, '.nii.gz', '.vtk'), '/seg/', '/centerlines/');
-    if ~exist(fileparts(tof_vessel_centerlines{i}),'dir'); mkdir(fileparts(tof_vessel_centerlines{i})); end
-    if forceThis || ~exist(tof_vessel_centerlines{i},'file')
-        slicer_centerline_from_mask(tof_vessel_label{i}, tof_vessel_centerlines{i});
-        % disp(strjoin(cmd,newline));
-    end
-end
+
 vmtk_viewVolAndSurf(tof, tof_vessel_centerlines{i})
 
 
-
-
-
-% create surface for each good component from seg (marching cubes -> clean -> smoothing [-> upsample])
-doSurfUpSample = true;  % set true to upsample for thin/coarse meshes (butterfly, 1 pass)
-for i = 1:length(okCompIdx_fromSeg)
-    tof_vessel_surf_files{i} = replace(replace(tof_vessel_label{i}, '.nii.gz', '.vtk'), '/seg/', '/surf/');
-    if ~exist(fileparts(tof_vessel_surf_files{i}),'dir'); mkdir(fileparts(tof_vessel_surf_files{i})); end
-    if forceThis || ~exist(tof_vessel_surf_files{i},'file');
-        tof_vessel_surf_raw    = replace(tof_vessel_surf_files{i}, '.vtk', '_raw.vtk');
-        tof_vessel_surf_cleaned = replace(tof_vessel_surf_files{i}, '.vtk', '_cleaned.vtk');
-        vmtk_surfFromSeg(tof_vessel_label{i}, tof_vessel_surf_raw);
-        vmtk_surfClean(tof_vessel_surf_raw, tof_vessel_surf_cleaned);
-        vmtk_surfSmoothing(tof_vessel_surf_cleaned, tof_vessel_surf_files{i});
-        if doSurfUpSample
-            tof_vessel_surf_up = replace(tof_vessel_surf_files{i}, '.vtk', '_up.vtk');
-            vmtk_surfUpSample(tof_vessel_surf_files{i}, tof_vessel_surf_up);
-            movefile(tof_vessel_surf_up, tof_vessel_surf_files{i});
-        end
-        vmtk_viewVolAndSurf(tof_vessel_label{i}, tof_vessel_surf_files{i})
-    end
-end
-
-
-
-for i = 1:length(okCompIdx_fromSeg)
-    tof_vessel_centerlines{i} = replace(tof_vessel_surf_files{i}, '/surf/', '/centerlines/');
-    if ~exist(fileparts(tof_vessel_centerlines{i}),'dir'); mkdir(fileparts(tof_vessel_centerlines{i})); end
-    if forceThis || ~exist(tof_vessel_centerlines{i},'file')
-        cmd = vmtk_centerlinesFromSurf(tof_vessel_surf_files{i}, tof_vessel_centerlines{i},[],[],1);
-        disp(strjoin(cmd,newline));
-    end
-end
-
-cmd = vmtk_viewVolAndCenterlines(tof, tof_vessel_centerlines{i}, 1);
-disp(strjoin(cmd,newline));
-
-
-
-
-
-
-
-
-
-
-
-forceThis = 0;
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% Extract vessel centerlines
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-forceThis = 1;
-% Step 1: Create surface mesh from segmentation
-tof_surf_file = fullfile(projectScratch,'tof','surf','tof_surface.vtk');
-if ~exist(fileparts(tof_surf_file),'dir'); mkdir(fileparts(tof_surf_file)); end
-if forceThis || ~exist(tof_surf_file,'file');
-    vmtk_surfFromSeg(tof_vesselSeg, tof_surf_file);
-end
-vmtk_viewVolAndSurf(tof_vesselSeg, tof_surf_file)
-
-
-
-% Step 2: Extract centerlines from surface mesh
-tof_centerlines_file = fullfile(projectScratch,'tof','centerlines','tof_centerlines.vtk');
-if ~exist(fileparts(tof_centerlines_file),'dir'); mkdir(fileparts(tof_centerlines_file)); end
-if forceThis || ~exist(tof_centerlines_file,'file');
-    vmtk_centerlinesFromSurf(tof_surf_file, tof_centerlines_file, 1);
-end
-vmtk_viewVolAndCenterlines(tof_vesselSeg, tof_centerlines_file, 1)
-
-
-
-
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% Register vessel centerlines vfMRI
-%% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% For later.
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
